@@ -1,5 +1,4 @@
-from .problems import MaxCutProblem, QUBOProblem
-from .qaoa import QAOASolver
-from .result import QAOAResult
+from .qubo import QUBOProblem
+from .problems import MaxCutProblem
 
-__all__ = ["MaxCutProblem", "QUBOProblem", "QAOASolver", "QAOAResult"]
+__all__ = ["QUBOProblem", "MaxCutProblem"]
