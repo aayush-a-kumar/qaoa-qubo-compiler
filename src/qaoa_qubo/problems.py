@@ -11,42 +11,47 @@ from .qubo import QUBOProblem
 @dataclass
 class MaxCutProblem:
     """
-    Simple MaxCut problem wrapper around a NetworkX graph.
+    Simple MaxCut problem defined by a dictionary of weighted edges.
+
+    Edges are given as a dict mapping (i, j) -> weight, where i and j
+    are integer node indices.
     """
 
-    graph: nx.Graph
-
-    @classmethod
-    def from_networkx(cls, graph: nx.Graph) -> "MaxCutProblem":
-        return cls(graph=graph)
+    def __init__(self, edges: Dict[Tuple[int, int], float]) -> None:
+        """
+        Parameters
+        ----------
+        edges : dict
+            Mapping (i, j) -> weight for each edge in the graph.
+        """
+        self.edges = edges
 
     def to_qubo(self) -> QUBOProblem:
         """
-        Convert the MaxCut instance into a QUBOProblem.
+        Build a QUBOProblem corresponding to the MaxCut objective:
 
-        For each edge (i, j), we add:
+            Maximize  sum_{(i,j)} w_ij * (x_i XOR x_j)
 
-            x_i + x_j - 2 x_i x_j
+        which is equivalent to minimizing a QUBO:
 
-        to the objective.
+            C(x) = sum_i a_i x_i + sum_{i<j} b_ij x_i x_j + const
         """
         linear: Dict[int, float] = {}
         quadratic: Dict[Tuple[int, int], float] = {}
+        constant = 0.0
 
-        for (i, j) in self.graph.edges():
-            # Linear contributions: x_i + x_j
-            linear[i] = linear.get(i, 0.0) + 1.0
-            linear[j] = linear.get(j, 0.0) + 1.0
+        for (i, j), w in self.edges.items():
+            # Normalize edge ordering
+            if i == j:
+                continue
+            u, v = sorted((i, j))
 
-            # Quadratic term: -2 x_i x_j
-            key = (min(i, j), max(i, j))
-            quadratic[key] = quadratic.get(key, 0.0) - 2.0
+            # Standard MaxCut QUBO encoding:
+            # w * (x_i XOR x_j) = w * (x_i + x_j - 2 x_i x_j)
+            linear[u] = linear.get(u, 0.0) + w
+            linear[v] = linear.get(v, 0.0) + w
+            key = (u, v)
+            quadratic[key] = quadratic.get(key, 0.0) - 2.0 * w
+            # constant term could be added, but it's irrelevant for argmin
 
-        num_variables = len(self.graph.nodes)
-
-        return QUBOProblem.from_dicts(
-            linear=linear,
-            quadratic=quadratic,
-            constant=0.0,
-            num_variables=num_variables,
-        )
+        return QUBOProblem.from_dicts(linear, quadratic, constant=constant)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional, Sequence, Tuple, Dict, Literal
 
 import numpy as np
-from qiskit import QuantumCircuit
+from qiskit import QuantumCircuit, transpile
 from qiskit.quantum_info import Statevector
 from qiskit.primitives import StatevectorSampler as Sampler
 from scipy.optimize import minimize
@@ -12,6 +12,7 @@ from .qubo import QUBOProblem
 from .problems import MaxCutProblem
 from .hamiltonian import qubo_to_ising
 from .result import QAOAResult
+from qaoa_qubo.circuit_builder import QAOACircuitBuilder
 
 
 BackendMode = Literal["statevector", "sampler"]
@@ -36,10 +37,12 @@ class QAOASolver:
         self,
         p: int = 1,
         maxiter: int = 100,
-        mode: BackendMode = "statevector",
-        sampler: Optional[Sampler] = None,
-        shots: int = 2000,
+        mode: str = "statevector",  # "statevector" or "sampler"
+        sampler=None,
+        shots: int = 1024,
         seed: Optional[int] = None,
+        transpile_backend=None,
+        transpile_kwargs: Optional[dict] = None,
     ) -> None:
         """
         Parameters
@@ -63,14 +66,18 @@ class QAOASolver:
             raise ValueError("p (number of QAOA layers) must be positive")
 
         if mode not in ("statevector", "sampler"):
-            raise ValueError("mode must be 'statevector' or 'sampler'")
+            raise ValueError(f"Unsupported mode: {mode}")
 
         self.p = p
         self.maxiter = maxiter
-        self.mode: BackendMode = mode
+        self.mode = mode
         self.sampler = sampler
         self.shots = shots
         self.rng = np.random.default_rng(seed)
+
+        # Optional backend used to transpile circuits before sampling
+        self.transpile_backend = transpile_backend
+        self.transpile_kwargs = transpile_kwargs or {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -249,26 +256,67 @@ class QAOASolver:
         qubo: QUBOProblem,
     ) -> float:
         """
-        Compute E[C(x)] using a Qiskit Sampler primitive.
+        Compute E[C(x)] using a sampler-like primitive.
 
-        This works with:
-        - qiskit.primitives.Sampler() (local)
-        - IBM Runtime Sampler objects (if passed in as self.sampler)
+        Supports:
+        - qiskit.primitives.Sampler (local) via result.quasi_dists[0]
+        - qiskit_ibm_runtime.SamplerV2 (Runtime) via result[0].data.meas.get_counts()
         """
-        sampler = self.sampler or Sampler()
-        job = sampler.run([circuit], shots=self.shots)
-        result = job.result()
-        dist = result.quasi_dists[0]  # quasi-probability distribution
-
         if qubo.num_variables is None:
             raise ValueError("QUBOProblem.num_variables is not set")
         n = qubo.num_variables
 
+        # --- Ensure the circuit has measurements ---
+        qc = circuit.copy()
+        has_measure = any(op.operation.name == "measure" for op in qc.data)
+        if not has_measure:
+            qc.measure_all()
+
+        # Optionally transpile for a hardware backend
+        if self.transpile_backend is not None:
+            circuit = transpile(
+                circuit,
+                backend=self.transpile_backend,
+                **self.transpile_kwargs,
+            )
+
+        sampler = self.sampler or Sampler()
+
+        job = sampler.run([circuit], shots=self.shots)
+        result = job.result()
+
+        # Case 1: local Sampler with quasi_dists
+        if hasattr(result, "quasi_dists"):
+            dist = result.quasi_dists[0]
+            exp_val = 0.0
+            for idx, p in dist.items():
+                bitstring = format(idx, f"0{n}b")
+                cost = qubo.evaluate(bitstring)
+                exp_val += float(p) * float(cost)
+            return float(exp_val)
+
+        # Case 2: Runtime SamplerV2-style result: list-like of PubResult
+        # with .data.meas.get_counts()
+        pub0 = result[0]
+        meas = getattr(pub0.data, "meas", None)
+        if meas is None or not hasattr(meas, "get_counts"):
+            raise RuntimeError(
+                "Sampler result does not provide quasi_dists or meas.get_counts; "
+                "unsupported sampler type."
+            )
+
+        counts = meas.get_counts()
+        total_shots = sum(counts.values())
+        if total_shots == 0:
+            raise RuntimeError("Sampler returned zero shots in counts.")
+
         exp_val = 0.0
-        for idx, p in dist.items():
-            bitstring = format(idx, f"0{n}b")
+        for bitstring, count in counts.items():
+            # Use last n bits in case of registers
+            bitstring = str(bitstring)[-n:]
+            prob = count / total_shots
             cost = qubo.evaluate(bitstring)
-            exp_val += float(p) * float(cost)
+            exp_val += float(prob) * float(cost)
 
         return float(exp_val)
 
@@ -288,11 +336,49 @@ class QAOASolver:
         circuit: QuantumCircuit,
         num_qubits: int,
     ) -> str:
+        """
+        Get most probable bitstring from a sampler-like primitive.
+
+        Supports:
+        - qiskit.primitives.Sampler
+        - qiskit_ibm_runtime.SamplerV2
+        """
+        # --- Ensure measurements ---
+        qc = circuit.copy()
+        has_measure = any(op.operation.name == "measure" for op in qc.data)
+        if not has_measure:
+            qc.measure_all()
+
+        # Optional transpilation for hardware
+        if self.transpile_backend is not None:
+            circuit = transpile(
+                circuit,
+                backend=self.transpile_backend,
+                **self.transpile_kwargs,
+            )
+
         sampler = self.sampler or Sampler()
         job = sampler.run([circuit], shots=self.shots)
         result = job.result()
-        dist = result.quasi_dists[0]
 
-        # Most probable key
-        idx = max(dist, key=dist.get)
-        return format(idx, f"0{num_qubits}b")
+        # Case 1: local Sampler with quasi_dists
+        if hasattr(result, "quasi_dists"):
+            dist = result.quasi_dists[0]
+            idx = max(dist, key=dist.get)
+            return format(idx, f"0{num_qubits}b")
+
+        # Case 2: Runtime SamplerV2-style result with counts
+        pub0 = result[0]
+        meas = getattr(pub0.data, "meas", None)
+        if meas is None or not hasattr(meas, "get_counts"):
+            raise RuntimeError(
+                "Sampler result does not provide quasi_dists or meas.get_counts; "
+                "unsupported sampler type."
+            )
+
+        counts = meas.get_counts()
+        # Pick bitstring with highest count
+        best_bitstring = max(counts, key=counts.get)
+        # Use last num_qubits bits in case of registers
+        return str(best_bitstring)[-num_qubits:]
+

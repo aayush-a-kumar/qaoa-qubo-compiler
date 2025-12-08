@@ -1,5 +1,6 @@
 from qaoa_qubo.problems import MaxCutProblem
 from qaoa_qubo.qaoa import QAOASolver
+from qaoa_qubo.visualize import plot_result_history
 
 # Simple 4-node example graph
 # Edge weights: fully connected graph
@@ -20,3 +21,9 @@ print("MaxCut value:", result.best_cost)
 print("Optimal params:")
 print("  gammas =", result.optimal_gammas)
 print("  betas  =", result.optimal_betas)
+
+plot_result_history(result)
+
+
+if __name__ == "__main__":
+    main()

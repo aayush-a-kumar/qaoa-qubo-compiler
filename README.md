@@ -88,7 +88,7 @@ src/qaoa_qubo/
 
 ## Roadmap
 
-- Add Qiskit Runtime support  
+- ~~Add Qiskit Runtime support~~ Done!  
 - Add analytic gradient-based QAOA (parameter shift)  
 - Add visualization tools (energy landscape, convergence plots)  
 - Add additional problem classes (k-SAT, graph coloring, clustering)
